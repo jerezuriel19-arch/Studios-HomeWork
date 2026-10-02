@@ -1,55 +1,50 @@
 import express from 'express';
-import path from 'path';
-import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { MercadoPagoConfig, Preference } from 'mercadopago';
-import { fileURLToPath } from 'url';
+import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
-const { Pool } = pg;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
+const { Pool } = pg;
 const PORT = process.env.PORT || 10000;
-const BASE_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN || '';
 const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET || '';
 
-const pool = process.env.DATABASE_URL ? new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
-}) : null;
-
-const PLANS = {
-  monthly: { title: 'Studios HomeWork PRO · 1 mes', amount: 3990, months: 1 },
-  quarterly: { title: 'Studios HomeWork PRO · 3 meses', amount: 9000, months: 3 },
-  annual: { title: 'Studios HomeWork PRO · 1 año', amount: 33900, months: 12 }
+const plans = {
+  monthly: { label: '1 mes', amount: 3990, months: 1 },
+  quarterly: { label: '3 meses', amount: 9000, months: 3 },
+  annual: { label: '1 año', amount: 33900, months: 12 }
 };
 
-function cleanEmail(v) { return String(v || '').trim().toLowerCase(); }
-function validEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
-function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString('hex'); }
-function sha256(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
-function parseCookies(req) {
-  const out = {};
-  const raw = req.headers.cookie || '';
-  for (const part of raw.split(';')) {
-    const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1));
-  }
-  return out;
-}
-function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', `shw_session=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`);
-}
-function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'shw_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0');
-}
+const pool = process.env.DATABASE_URL ? new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined
+}) : null;
+
+const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const randomToken = () => crypto.randomBytes(32).toString('hex');
+const passwordHash = async (password, salt = crypto.randomBytes(16).toString('hex')) => {
+  const derived = await new Promise((resolve, reject) => crypto.scrypt(password, salt, 64, (e, k) => e ? reject(e) : resolve(k.toString('hex'))));
+  return `${salt}:${derived}`;
+};
+const passwordVerify = async (password, stored) => {
+  const [salt, key] = String(stored || '').split(':');
+  if (!salt || !key) return false;
+  const derived = await new Promise((resolve, reject) => crypto.scrypt(password, salt, 64, (e, k) => e ? reject(e) : resolve(k.toString('hex'))));
+  return crypto.timingSafeEqual(Buffer.from(key, 'hex'), Buffer.from(derived, 'hex'));
+};
+const normalizeEmail = (e) => String(e || '').trim().toLowerCase();
+
 async function dbReady() {
-  if (!pool) throw new Error('DATABASE_URL no está configurada.');
+  if (!pool) throw new Error('DATABASE_URL no configurada');
 }
+
 async function initDb() {
-  if (!pool) return;
+  await dbReady();
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
@@ -61,12 +56,11 @@ async function initDb() {
     );
     CREATE TABLE IF NOT EXISTS sessions (
       id BIGSERIAL PRIMARY KEY,
-      token_hash TEXT NOT NULL UNIQUE,
       user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
       expires_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    CREATE INDEX IF NOT EXISTS sessions_token_hash_idx ON sessions(token_hash);
     CREATE TABLE IF NOT EXISTS payments (
       id BIGSERIAL PRIMARY KEY,
       payment_id TEXT UNIQUE,
@@ -75,168 +69,172 @@ async function initDb() {
       amount NUMERIC(12,2) NOT NULL,
       status TEXT NOT NULL,
       external_reference TEXT,
-      approved_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ
     );
+    CREATE INDEX IF NOT EXISTS sessions_token_hash_idx ON sessions(token_hash);
   `);
 }
+
+function cookieOptions(maxAge) {
+  return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`;
+}
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
 async function currentUser(req) {
-  if (!pool) return null;
+  await dbReady();
   const token = parseCookies(req).shw_session;
   if (!token) return null;
-  const { rows } = await pool.query(`
-    SELECT u.id, u.email, u.pro_plan, u.pro_expires_at
-    FROM sessions s JOIN users u ON u.id=s.user_id
-    WHERE s.token_hash=$1 AND s.expires_at > NOW()
-  `, [sha256(token)]);
-  return rows[0] || null;
-}
-function publicUser(u) {
-  if (!u) return { loggedIn: false, isPro: false, email: null, plan: null, expiresAt: null };
-  const isPro = !!u.pro_expires_at && new Date(u.pro_expires_at).getTime() > Date.now();
-  return { loggedIn: true, isPro, email: u.email, plan: isPro ? u.pro_plan : null, expiresAt: isPro ? u.pro_expires_at : null };
-}
-async function requireUser(req, res) {
-  const user = await currentUser(req);
-  if (!user) { res.status(401).json({ ok: false, error: 'Necesitás iniciar sesión.' }); return null; }
-  return user;
+  const { rows } = await pool.query(`SELECT u.id,u.email,u.pro_plan,u.pro_expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>NOW()`, [hash(token)]);
+  if (!rows[0]) return null;
+  return rows[0];
 }
 
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+function requireFields(body, fields) {
+  for (const f of fields) if (!body?.[f]) return f;
+  return null;
+}
 
-app.get('/health', async (req, res) => {
-  let database = 'not_configured';
-  if (pool) {
-    try { await pool.query('SELECT 1'); database = 'ok'; } catch { database = 'error'; }
-  }
-  res.json({ ok: true, database, mercadoPago: !!MP_ACCESS_TOKEN });
+app.use('/api', express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: false }));
+
+app.get('/health', async (_req, res) => {
+  try { await dbReady(); await pool.query('SELECT 1'); res.json({ ok: true, database: true }); }
+  catch (e) { res.status(503).json({ ok: false, database: false, error: e.message }); }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const u = await currentUser(req);
+    if (!u) return res.json({ loggedIn: false });
+    const isPro = !!u.pro_expires_at && new Date(u.pro_expires_at) > new Date();
+    res.json({ loggedIn: true, email: u.email, isPro, plan: u.pro_plan || null, expiresAt: u.pro_expires_at || null });
+  } catch (e) { res.status(503).json({ error: 'Base de datos no disponible' }); }
 });
 
 app.post('/api/auth/register', async (req, res) => {
   try {
     await dbReady();
-    const email = cleanEmail(req.body.email);
-    const password = String(req.body.password || '');
-    if (!validEmail(email)) return res.status(400).json({ ok: false, error: 'Ingresá un email válido.' });
-    if (password.length < 8) return res.status(400).json({ ok: false, error: 'La contraseña debe tener al menos 8 caracteres.' });
-    const hash = await bcrypt.hash(password, 12);
-    const { rows } = await pool.query('INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id,email,pro_plan,pro_expires_at', [email, hash]);
+    const email = normalizeEmail(req.body.email), password = String(req.body.password || '');
+    if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Ingresá un email válido.' });
+    if (password.length < 8) return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres.' });
+    const ph = await passwordHash(password);
+    const r = await pool.query('INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id,email', [email, ph]);
     const token = randomToken();
-    await pool.query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL \'30 days\')', [sha256(token), rows[0].id]);
-    setSessionCookie(res, token);
-    res.json({ ok: true, user: publicUser(rows[0]) });
+    await pool.query(`INSERT INTO sessions(user_id,token_hash,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')`, [r.rows[0].id, hash(token)]);
+    res.setHeader('Set-Cookie', `shw_session=${encodeURIComponent(token)}; ${cookieOptions(60*60*24*30)}`);
+    res.json({ ok: true, email });
   } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ ok: false, error: 'Ese email ya tiene una cuenta.' });
-    console.error(e); res.status(500).json({ ok: false, error: 'No se pudo crear la cuenta.' });
+    if (e.code === '23505') return res.status(409).json({ error: 'Ese email ya está registrado.' });
+    console.error(e); res.status(500).json({ error: 'No se pudo crear la cuenta.' });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     await dbReady();
-    const email = cleanEmail(req.body.email);
-    const password = String(req.body.password || '');
-    const { rows } = await pool.query('SELECT id,email,password_hash,pro_plan,pro_expires_at FROM users WHERE email=$1', [email]);
-    const user = rows[0];
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) return res.status(401).json({ ok: false, error: 'Email o contraseña incorrectos.' });
+    const email = normalizeEmail(req.body.email), password = String(req.body.password || '');
+    const r = await pool.query('SELECT id,email,password_hash FROM users WHERE email=$1', [email]);
+    if (!r.rows[0] || !(await passwordVerify(password, r.rows[0].password_hash))) return res.status(401).json({ error: 'Email o contraseña incorrectos.' });
     const token = randomToken();
-    await pool.query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL \'30 days\')', [sha256(token), user.id]);
-    setSessionCookie(res, token);
-    res.json({ ok: true, user: publicUser(user) });
-  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: 'No se pudo iniciar sesión.' }); }
+    await pool.query(`INSERT INTO sessions(user_id,token_hash,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')`, [r.rows[0].id, hash(token)]);
+    res.setHeader('Set-Cookie', `shw_session=${encodeURIComponent(token)}; ${cookieOptions(60*60*24*30)}`);
+    res.json({ ok: true, email });
+  } catch (e) { console.error(e); res.status(503).json({ error: 'Base de datos no disponible.' }); }
 });
 
 app.post('/api/auth/logout', async (req, res) => {
-  try {
-    if (pool) { const token = parseCookies(req).shw_session; if (token) await pool.query('DELETE FROM sessions WHERE token_hash=$1', [sha256(token)]); }
-  } catch {}
-  clearSessionCookie(res); res.json({ ok: true });
-});
-
-app.get('/api/auth/me', async (req, res) => {
-  try { res.json({ ok: true, user: publicUser(await currentUser(req)) }); }
-  catch (e) { res.status(500).json({ ok: false, error: 'No se pudo consultar la cuenta.' }); }
+  try { if (pool) { const t=parseCookies(req).shw_session; if(t) await pool.query('DELETE FROM sessions WHERE token_hash=$1',[hash(t)]); } } catch {}
+  res.setHeader('Set-Cookie', `shw_session=; ${cookieOptions(0)}`);
+  res.json({ ok: true });
 });
 
 app.post('/api/create-preference', async (req, res) => {
   try {
-    const user = await requireUser(req, res); if (!user) return;
-    if (!MP_ACCESS_TOKEN) return res.status(503).json({ ok: false, error: 'Mercado Pago todavía no está configurado en el servidor.' });
-    const planKey = String(req.body.plan || '');
-    const plan = PLANS[planKey];
-    if (!plan) return res.status(400).json({ ok: false, error: 'Plan inválido.' });
-    const externalReference = `shw:${user.id}:${planKey}:${randomToken(10)}`;
-    const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
-    const preference = new Preference(client);
-    const created = await preference.create({ body: {
-      items: [{ title: plan.title, quantity: 1, currency_id: 'ARS', unit_price: plan.amount }],
-      external_reference: externalReference,
-      notification_url: `${BASE_URL}/api/mercadopago/webhook`,
-      back_urls: { success: `${BASE_URL}/?payment=success`, failure: `${BASE_URL}/?payment=failure`, pending: `${BASE_URL}/?payment=pending` },
-      auto_return: 'approved'
+    if (!MP_ACCESS_TOKEN) return res.status(503).json({ error: 'Mercado Pago no está configurado.' });
+    const u = await currentUser(req);
+    if (!u) return res.status(401).json({ error: 'INICIAR_SESION' });
+    const plan = String(req.body.plan || '');
+    if (!plans[plan]) return res.status(400).json({ error: 'Plan inválido.' });
+    const mp = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+    const preference = new Preference(mp);
+    const reference = `shw:${u.id}:${plan}:${crypto.randomUUID()}`;
+    const base = APP_URL || `${req.protocol}://${req.get('host')}`;
+    const result = await preference.create({ body: {
+      items: [{ id: `shw-${plan}`, title: `Studios HomeWork PRO · ${plans[plan].label}`, quantity: 1, unit_price: plans[plan].amount, currency_id: 'ARS' }],
+      external_reference: reference,
+      metadata: { user_id: String(u.id), plan },
+      back_urls: { success: `${base}/?payment=success`, failure: `${base}/?payment=failure`, pending: `${base}/?payment=pending` },
+      auto_return: 'approved',
+      notification_url: `${base}/api/mercadopago/webhook`
     }});
-    res.json({ ok: true, init_point: created.init_point, preference_id: created.id });
-  } catch (e) { console.error(e); res.status(500).json({ ok: false, error: 'No se pudo crear el pago.' }); }
+    res.json({ init_point: result.init_point });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'No se pudo crear el pago.' }); }
 });
 
-async function verifyWebhook(req) {
-  if (!MP_WEBHOOK_SECRET) return false;
-  const sig = req.headers['x-signature'];
-  const requestId = req.headers['x-request-id'] || '';
-  const dataId = String(req.query['data.id'] || '').toLowerCase();
-  if (!sig || !dataId) return false;
-  let ts = '', v1 = '';
-  for (const part of String(sig).split(',')) {
-    const [k, ...rest] = part.split('=');
-    const v = rest.join('=').trim();
-    if (k?.trim() === 'ts') ts = v;
-    if (k?.trim() === 'v1') v1 = v;
-  }
-  if (!ts || !v1) return false;
-  const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
-  const expected = crypto.createHmac('sha256', MP_WEBHOOK_SECRET).update(manifest).digest('hex');
-  const a = Buffer.from(expected, 'utf8'), b = Buffer.from(v1, 'utf8');
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+function verifySignature(req) {
+  if (!MP_WEBHOOK_SECRET) return process.env.NODE_ENV !== 'production';
+  const sig = String(req.headers['x-signature'] || '');
+  const requestId = String(req.headers['x-request-id'] || '');
+  const dataId = String(req.query['data.id'] || req.body?.data?.id || '').toLowerCase();
+  let ts='', v1='';
+  for (const p of sig.split(',')) { const [k,...v]=p.split('='); if(k==='ts') ts=v.join('='); if(k==='v1') v1=v.join('='); }
+  if (!ts || !v1 || !dataId || !requestId) return false;
+  const template = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const expected = crypto.createHmac('sha256', MP_WEBHOOK_SECRET).update(template).digest('hex');
+  try { return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)); } catch { return false; }
 }
 
 app.post('/api/mercadopago/webhook', async (req, res) => {
+  res.sendStatus(200);
   try {
-    if (!MP_WEBHOOK_SECRET || !(await verifyWebhook(req))) return res.status(401).json({ ok: false });
-    const type = req.body?.type || req.query?.type;
-    if (type !== 'payment') return res.status(200).json({ ok: true });
-    const paymentId = String(req.body?.data?.id || req.query['data.id'] || '');
-    if (!paymentId || !MP_ACCESS_TOKEN) return res.status(200).json({ ok: true });
-    const mp = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: `Bearer ${MP_ACCESS_TOKEN}` } });
-    if (!mp.ok) return res.status(200).json({ ok: true });
-    const payment = await mp.json();
+    if (!verifySignature(req) || !MP_ACCESS_TOKEN) return;
+    const type = String(req.body?.type || req.query?.type || '');
+    if (type !== 'payment') return;
+    const paymentId = String(req.body?.data?.id || req.query?.['data.id'] || '');
+    if (!paymentId) return;
+    const mp = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
+    const payment = await new Payment(mp).get({ id: paymentId });
+    if (!['approved'].includes(payment.status)) return;
     const reference = String(payment.external_reference || '');
-    const match = reference.match(/^shw:(\d+):(monthly|quarterly|annual):/);
-    if (!match) return res.status(200).json({ ok: true });
-    const userId = Number(match[1]);
-    const planKey = match[2];
-    const plan = PLANS[planKey];
-    if (Number(payment.transaction_amount) !== plan.amount) return res.status(200).json({ ok: true });
-    await pool.query(`
-      INSERT INTO payments(payment_id,user_id,plan,amount,status,external_reference,approved_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7)
-      ON CONFLICT(payment_id) DO UPDATE SET status=EXCLUDED.status, approved_at=EXCLUDED.approved_at
-    `, [paymentId, userId, planKey, plan.amount, payment.status || 'unknown', reference, payment.status === 'approved' ? new Date(payment.date_approved || Date.now()) : null]);
-    if (payment.status === 'approved') {
-      await pool.query(`
-        UPDATE users SET pro_plan=$1,
-          pro_expires_at=GREATEST(COALESCE(pro_expires_at,NOW()),NOW()) + ($2 || ' months')::interval
-        WHERE id=$3
-      `, [planKey, String(plan.months), userId]);
-    }
-    res.status(200).json({ ok: true });
-  } catch (e) { console.error('webhook', e); res.status(200).json({ ok: true }); }
+    const m = reference.match(/^shw:(\d+):(monthly|quarterly|annual):/);
+    if (!m) return;
+    const userId = Number(m[1]), plan = m[2], p = plans[plan];
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const exists = await client.query('SELECT id FROM payments WHERE payment_id=$1', [paymentId]);
+      if (!exists.rows[0]) {
+        const old = await client.query('SELECT pro_expires_at FROM users WHERE id=$1 FOR UPDATE', [userId]);
+        if (!old.rows[0]) { await client.query('ROLLBACK'); return; }
+        const current = old.rows[0].pro_expires_at && new Date(old.rows[0].pro_expires_at) > new Date() ? new Date(old.rows[0].pro_expires_at) : new Date();
+        current.setMonth(current.getMonth() + p.months);
+        await client.query('UPDATE users SET pro_plan=$1,pro_expires_at=$2 WHERE id=$3', [plan, current, userId]);
+        await client.query(`INSERT INTO payments(payment_id,user_id,plan,amount,status,external_reference,approved_at) VALUES($1,$2,$3,$4,'approved',$5,NOW())`, [paymentId,userId,plan,p.amount,reference]);
+      }
+      await client.query('COMMIT');
+    } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  } catch (e) { console.error('Webhook:', e); }
 });
 
-app.use(express.static(__dirname));
-app.get('/{*splat}', (req, res, next) => {
-  if (req.path.startsWith('/api/') || req.path === '/health') return next();
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.get('/account-layer.js', (_req, res) => {
+  res.type('application/javascript').sendFile(path.join(__dirname, 'account-layer.js'));
 });
 
-initDb().then(() => app.listen(PORT, () => console.log(`Studios HomeWork escuchando en ${PORT}`))).catch(err => { console.error('DB init error:', err); app.listen(PORT, () => console.log(`Studios HomeWork escuchando en ${PORT} (DB pendiente)`)); });
+app.get('/', (_req, res) => {
+  const file = path.join(__dirname, 'index.html');
+  res.sendFile(file, { headers: { 'Content-Type': 'text/html; charset=UTF-8' } }, (err) => {
+    if (err && !res.headersSent) res.status(500).send('No se pudo cargar Studios HomeWork.');
+  });
+});
+app.use(express.static(__dirname, { index: false }));
+app.use((req,res,next)=>{ if(req.method!=='GET') return next(); if(req.path.startsWith('/api/')||req.path==='/health'||req.path==='/account-layer.js') return next(); res.sendFile(path.join(__dirname,'index.html')); });
+
+if (pool) initDb().then(()=>app.listen(PORT,()=>console.log(`Studios HomeWork escuchando en ${PORT}`))).catch(e=>{console.error(e);process.exit(1)});
+else app.listen(PORT,()=>console.log(`Studios HomeWork escuchando en ${PORT} (DATABASE_URL pendiente)`));

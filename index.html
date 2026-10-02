@@ -2682,7 +2682,7 @@ try{drawExtra();plcScan();seqRender()}catch(e){console.warn('SHW120 init:',e)}
 (()=>{
  const $=id=>document.getElementById(id);
  const opener=$('rBandOpen'), body=$('rBandProBody');
- if(opener&&body){opener.addEventListener('click',()=>{body.hidden=!body.hidden;opener.textContent=body.hidden?'🔓 ABRIR PRO':'🔒 CERRAR';});}
+ if(opener&&body){opener.addEventListener('click',(ev)=>{if(typeof isProDemo==='function'&&!isProDemo()){ev.preventDefault();ev.stopImmediatePropagation();if(typeof proGate==='function')proGate('Codificador de colores de resistencias');else if(typeof showPro==='function')showPro();return;}body.hidden=!body.hidden;opener.textContent=body.hidden?'🔓 ABRIR PRO':'🔒 CERRAR';});}
  const btn=$('sh117_z_calc');
  if(btn){btn.addEventListener('click',()=>{
    const vin=Number($('sh117_z_vin').value), vz=Number($('sh117_z_vz').value), il=Number($('sh117_z_il').value)/1000, iz=Number($('sh117_z_iz').value)/1000, out=$('sh117_z_out');
@@ -2834,6 +2834,28 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 })();
 </script>
 
+<style id="shw-final-visual-fix">
+/* V6 · PRO visual + cleanup: evita superficies blancas en el flujo oscuro. */
+#sec-traductor-pro.hw80Trans{background:linear-gradient(145deg,#0c1826,#08131f)!important;color:#edf6ff!important;border-color:#29415a!important}
+#sec-traductor-pro.hw80Trans h2{color:#f8fbff!important}
+#sec-traductor-pro.hw80Trans p,#sec-traductor-pro.hw80Trans label{color:#c6d5e4!important}
+#sec-traductor-pro.hw80Trans input,#sec-traductor-pro.hw80Trans select,#sec-traductor-pro.hw80Trans textarea{background:#091521!important;color:#f3f8fc!important;border-color:#36516d!important}
+#sec-traductor-pro .hw80Lock{background:#0b1724!important;color:#dbe8f5!important;border-color:#36516d!important}
+#sec-traductor-pro .shw100kTranslatorBadge{background:#0b1724!important;color:#edf6ff!important;border-color:#36516d!important}
+#sec-traductor-pro .shw100kTranslatorBadge span,#sec-traductor-pro .shw100kTranslatorBadge small{color:#b9c9d9!important}
+#sec-traductor-pro .shw100kTranslatorBadge strong{color:#7dd3fc!important}
+#hw85Wrap{color:#edf6ff!important}
+#hw85Wrap .hw85Hero{background:linear-gradient(135deg,#0f172a,#1e293b)!important;color:#fff!important}
+#hw85Wrap .hw85Card,#hw85Wrap .hw85Panel{background:linear-gradient(145deg,#0d1b2a,#091522)!important;color:#edf6ff!important;border-color:#29415a!important}
+#hw85Wrap .hw85Card h3,#hw85Wrap .hw85Card p,#hw85Wrap .hw85Panel h3,#hw85Wrap .hw85Panel p,#hw85Wrap .hw85Panel b,#hw85Wrap .hw85Panel li,#hw85Wrap .hw85Panel label{color:#edf6ff!important}
+#hw85Wrap .hw85Card p,#hw85Wrap .hw85Panel p{color:#b9c9d9!important}
+#hw85Wrap .hw85Search,#hw85Wrap .hw85Field select,#hw85Wrap .hw85Field textarea{background:#071522!important;color:#f3f8fc!important;border-color:#36516d!important}
+#hw85Wrap .hw85Cat{background:#102438!important;color:#eaf3ff!important;border-color:#31516c!important}
+#hw85Wrap .hw85Item{background:#0a1622!important;color:#edf6ff!important;border-color:#29415a!important}
+#hw85Wrap .hw85Item p{color:#b9c9d9!important}
+.hw86MechanicalSOS{background:linear-gradient(145deg,#24180e,#17100b)!important;border-color:#7a5127!important;color:#ffe6bd!important}
+.hw86MechanicalSOS b,.hw86MechanicalSOS span{color:#ffe0ae!important}
+</style>
 <!-- SHW PUBLIC V4 FINAL HARDENING -->
 <style id="shw-public-v4-css">
   /* PRO no invade el inicio; la sección se muestra solo cuando se navega hacia ella. */
@@ -2850,6 +2872,15 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     if(typeof proGate==='function') return proGate(label);
     if(typeof modal==='function') return modal('👑 Función PRO','Esta herramienta forma parte de Studios HomeWork PRO.',`<div class="lockBox"><h3>Contenido bloqueado</h3><p>Elegí uno de los 3 planes desde la sección PRO para continuar.</p><button class="proBtn" onclick="showPro()">VER PLANES PRO</button></div>`);
   }
+  // Gate direct navigation to PRO-only sections and the electronics color decoder.
+  document.addEventListener('click',function(e){
+    const menu=e.target.closest && e.target.closest('#shw89MenuItems button');
+    if(menu && /Traductor/i.test(menu.textContent||'')){e.preventDefault();e.stopImmediatePropagation();gate('Traductor PRO');return;}
+    const tr=e.target.closest && e.target.closest('[data-shw122-open=\"sec-traductor-pro\"]');
+    if(tr){e.preventDefault();e.stopImmediatePropagation();gate('Traductor PRO');return;}
+    const rb=e.target.closest && e.target.closest('#rBandOpen');
+    if(rb){e.preventDefault();e.stopImmediatePropagation();gate('Codificador de colores de resistencias');return;}
+  },true);
   // In the public GitHub build, localStorage demo flags must never unlock PRO/IA accidentally.
   if(PUBLIC_BUILD){
     window.isProDemo=function(){return false};
@@ -3050,6 +3081,4 @@ w.addEventListener('load',function(){try{
   b.appendChild(y);b.appendChild(n);d.body.appendChild(b)}catch(_){}},2500)}catch(_){}});
 }catch(e){}})();
 </script>
-
-<script src="/account-layer.js"></script>
 </body></html>

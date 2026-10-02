@@ -1,6 +1,6 @@
 import express from "express";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import path from "path";
+import { fileURLToPath } from "url";
 import { MercadoPagoConfig, Preference } from "mercadopago";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,7 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
 
-app.use(express.json({ limit: "100kb" }));
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static(__dirname));
 
 const plans = {
@@ -19,57 +19,61 @@ const plans = {
   annual: { title: "Studios HomeWork PRO - 1 año", price: 33900 }
 };
 
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "Studios HomeWork",
-    mercadopagoConfigured: Boolean(MP_ACCESS_TOKEN)
-  });
+app.get("/health", (req, res) => {
+  res.json({ ok: true, mercadopago_configured: Boolean(MP_ACCESS_TOKEN) });
 });
 
 app.post("/api/create-preference", async (req, res) => {
   try {
     if (!MP_ACCESS_TOKEN) {
-      return res.status(500).json({ error: "Falta configurar MP_ACCESS_TOKEN en Render." });
+      return res.status(500).json({ error: "Mercado Pago no está configurado en el servidor." });
     }
 
-    const planKey = String(req.body?.plan || "");
-    const plan = plans[planKey];
-    if (!plan) return res.status(400).json({ error: "Plan inválido." });
+    const selectedPlan = plans[req.body.plan];
+
+    if (!selectedPlan) {
+      return res.status(400).json({ error: "Plan inválido." });
+    }
 
     const client = new MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
     const preference = new Preference(client);
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-    const result = await preference.create({
+    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const baseUrl = `${protocol}://${req.get("host")}`;
+
+    const response = await preference.create({
       body: {
         items: [{
-          title: plan.title,
+          id: `shw-${req.body.plan}`,
+          title: selectedPlan.title,
           quantity: 1,
           currency_id: "ARS",
-          unit_price: plan.price
+          unit_price: selectedPlan.price
         }],
-        external_reference: `studios-homework-${planKey}-${Date.now()}`,
+        external_reference: `studios-homework-${req.body.plan}-${Date.now()}`,
         back_urls: {
-          success: `${baseUrl}/?payment=success&plan=${planKey}`,
-          failure: `${baseUrl}/?payment=failure&plan=${planKey}`,
-          pending: `${baseUrl}/?payment=pending&plan=${planKey}`
+          success: `${baseUrl}/?payment=success`,
+          failure: `${baseUrl}/?payment=failure`,
+          pending: `${baseUrl}/?payment=pending`
         },
         auto_return: "approved"
       }
     });
 
-    res.json({ id: result.id, init_point: result.init_point });
+    return res.json({ id: response.id, init_point: response.init_point });
   } catch (error) {
-    console.error("Mercado Pago preference error:", error);
-    res.status(500).json({ error: "Mercado Pago no pudo crear la preferencia." });
+    console.error("Mercado Pago error:", error);
+    return res.status(500).json({ error: "No se pudo crear el checkout de Mercado Pago." });
   }
 });
 
-app.get("*", (_req, res) => {
+// Fallback compatible con Express 5.
+app.use((req, res, next) => {
+  if (req.method !== "GET") return next();
+  if (req.path.startsWith("/api/") || req.path === "/health") return next();
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Studios HomeWork escuchando en el puerto ${PORT}`);
 });

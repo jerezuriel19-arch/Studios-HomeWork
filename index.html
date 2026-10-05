@@ -3074,5 +3074,43 @@ w.addEventListener('load',function(){try{
 }catch(e){}})();
 </script>
 
+<style id="shw-course-lock-css">
+.shw127PackCard.shwLocked{position:relative;overflow:hidden}
+.shw127PackCard.shwLocked:after{content:"🔒 BLOQUEADO · PRO";position:absolute;top:12px;right:12px;padding:6px 9px;border-radius:999px;background:#17283b;border:1px solid #35506c;color:#b9d8f4;font-size:11px;font-weight:900;letter-spacing:.03em}
+.shw127PackCard.shwLocked a,.shw98-course-copy a{cursor:pointer}
+</style>
+<script id="shw-course-pro-lock">
+(function(){
+  'use strict';
+  function state(){return window.SHWAccountState||{loggedIn:false,isPro:false};}
+  function lockLabel(){return '🔒 Contenido bloqueado: disponible con PRO. Elegí un plan y, una vez acreditado el pago, se desbloquea en tu cuenta.';}
+  function gate(){
+    var st=state();
+    if(!st.loggedIn){
+      if(typeof window.openSHWLogin==='function') return window.openSHWLogin();
+      var b=document.getElementById('shwAccountBtn'); if(b){b.click();return;}
+      alert('Iniciá sesión para acceder al contenido PRO.'); return;
+    }
+    if(!st.isPro){
+      if(typeof window.showPro==='function') return window.showPro();
+      if(typeof window.proGate==='function') return window.proGate('Cursos PRO');
+      alert(lockLabel()); return;
+    }
+  }
+  function mark(){
+    document.querySelectorAll('.shw127PackCard').forEach(function(card){
+      card.classList.toggle('shwLocked',!state().isPro);
+    });
+    document.querySelectorAll('#sec-curso-pro .shw98-course-copy a[href*="drive.google.com"],#sec-curso-pro a[href*="kommo.cc"]').forEach(function(a){
+      if(!a.dataset.shwCourseLocked){a.dataset.shwCourseLocked='1';a.addEventListener('click',function(e){if(!state().isPro){e.preventDefault();e.stopImmediatePropagation();gate();}},true);}
+    });
+    document.querySelectorAll('.shw127PackCard a[href*="drive.google.com"],.shw127PackCard a[href*="kommo.cc"]').forEach(function(a){
+      if(!a.dataset.shwCourseLocked){a.dataset.shwCourseLocked='1';a.addEventListener('click',function(e){if(!state().isPro){e.preventDefault();e.stopImmediatePropagation();gate();}},true);}
+    });
+  }
+  window.addEventListener('shw-account-state',mark);
+  window.addEventListener('load',function(){setTimeout(mark,250);});
+})();
+</script>
 <script src="/account-layer.js"></script>
 </body></html>
